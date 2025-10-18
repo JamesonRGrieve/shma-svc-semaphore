@@ -20,8 +20,44 @@
   loop_control:
     label: "{{ item.key }}"
 
+- name: Validate MariaDB dependency metadata
+  when:
+    - dependency_exports is defined
+    - dependency_exports.mariadb is defined
+  block:
+    - name: Ensure MariaDB dependency exports define DATABASE_HOST
+      assert:
+        that:
+          - dependency_exports.mariadb.DATABASE_HOST is defined
+          - dependency_exports.mariadb.DATABASE_HOST | string | length > 0
+        fail_msg: >-
+          dependency_exports.mariadb is defined but DATABASE_HOST was not provided.
+          Provided keys: {{ dependency_exports.mariadb.keys() | list | join(', ') }}.
+
+    - name: Ensure MariaDB dependency meets minimum version requirement
+      vars:
+        mariadb_version_candidates: >-
+          {{
+            [
+              dependency_exports.mariadb.VERSION | default(''),
+              dependency_exports.mariadb.version | default(''),
+              dependency_exports.mariadb.database_version | default('')
+            ]
+            | map('regex_replace', '^\\s+', '')
+            | map('regex_replace', '\\s+$', '')
+            | reject('equalto', '')
+            | list
+          }}
+        mariadb_reported_version: "{{ mariadb_version_candidates | first | default('') }}"
+      assert:
+        that:
+          - mariadb_reported_version | length > 0
+          - (mariadb_reported_version | length == 0) or (mariadb_reported_version is version(semaphore_required_mariadb_version, '>='))
+        fail_msg: >-
+          MariaDB dependency version {{ mariadb_reported_version | default('unknown') }} does not satisfy
+          the minimum requirement of >= {{ semaphore_required_mariadb_version }}.
+
 - name: Perform dependency pre-flight checks
-  run_once: true
   block:
     - name: Wait for MariaDB dependency to accept connections
       when: semaphore_db_verify_connectivity | bool
@@ -30,8 +66,21 @@
         port: "{{ semaphore_db_port | int }}"
         timeout: "{{ semaphore_db_connect_timeout }}"
         msg: >-
-          Timed out waiting for MariaDB at {{ semaphore_db_host }}:{{ semaphore_db_port }}.
+          Timed out waiting for MariaDB at {{ semaphore_db_endpoint }}.
           Ensure the database dependency is reachable before deploying Semaphore.
+
+    - name: Validate MariaDB credentials
+      when: semaphore_db_verify_connectivity | bool
+      community.mysql.mysql_query:
+        login_host: "{{ semaphore_db_host }}"
+        login_port: "{{ semaphore_db_port | int }}"
+        login_user: "{{ semaphore_db_user }}"
+        login_password: "{{ semaphore_db_password }}"
+        login_db: "{{ semaphore_db_name }}"
+        connect_timeout: "{{ semaphore_db_connect_timeout }}"
+        query: "SELECT 1"
+      register: semaphore_db_credentials_check
+      failed_when: semaphore_db_credentials_check is failed
 
     - name: Validate administrator and database secrets
       no_log: true
@@ -50,12 +99,13 @@
           assert:
             that:
               - password | length >= semaphore_password_min_length
-              - password is match(semaphore_password_complexity_regex)
+              - (semaphore_password_complexity_regex | length == 0) or (password is match(semaphore_password_complexity_regex))
+              - password | lower not in semaphore_common_weak_passwords
               - password | lower != semaphore_admin_password_default | lower
-            fail_msg: >-
-              The Semaphore administrator password must be rotated from the default and meet
-              the configured complexity policy (minimum length {{ semaphore_password_min_length }}
-              with upper, lower, number, and symbol characters).
+          fail_msg: >-
+            The Semaphore administrator password must be rotated from the default, avoid
+            common weak values, and satisfy the configured policy (minimum length
+            {{ semaphore_password_min_length }}{{ ' and regex constraint ' ~ semaphore_password_complexity_regex if semaphore_password_complexity_regex | length > 0 else '' }}).
 
         - name: Ensure database password meets complexity requirements
           vars:
@@ -63,12 +113,46 @@
           assert:
             that:
               - password | length >= semaphore_password_min_length
-              - password is match(semaphore_password_complexity_regex)
+              - (semaphore_password_complexity_regex | length == 0) or (password is match(semaphore_password_complexity_regex))
+              - password | lower not in semaphore_common_weak_passwords
               - password | lower != semaphore_db_password_default | lower
             fail_msg: >-
-              The Semaphore database password must be rotated from the default and meet the
-              configured complexity policy (minimum length {{ semaphore_password_min_length }}
-              with upper, lower, number, and symbol characters).
+              The Semaphore database password must be rotated from the default, avoid common
+              weak values, and satisfy the configured policy (minimum length
+              {{ semaphore_password_min_length }}{{ ' and regex constraint ' ~ semaphore_password_complexity_regex if semaphore_password_complexity_regex | length > 0 else '' }}).
+
+- name: Ensure merged service environment has unique variable names
+  vars:
+    semaphore_service_env_names: "{{ semaphore_service_env | map(attribute='name') | list }}"
+    semaphore_duplicate_env_names: "{{ semaphore_service_env_names | difference(semaphore_service_env_names | unique) | unique }}"
+  assert:
+    that:
+      - semaphore_duplicate_env_names | length == 0
+    fail_msg: >-
+      Duplicate environment variable names detected in semaphore_service_env: {{ semaphore_duplicate_env_names | join(', ') }}.
+
+- name: Warn when job volume sizing may be insufficient
+  vars:
+    semaphore_estimated_volume_requirement_gb: "{{ (semaphore_estimated_daily_artifacts_mb | float * semaphore_cleanup_days | float) / 1024 }}"
+  when:
+    - semaphore_estimated_daily_artifacts_mb | int > 0
+    - semaphore_estimated_volume_requirement_gb > (semaphore_jobs_volume_size_gb | float)
+  debug:
+    msg: >-
+      Estimated artifact retention requires approximately {{ '%.2f' | format(semaphore_estimated_volume_requirement_gb) }}GiB,
+      which exceeds the configured jobs volume size of {{ semaphore_jobs_volume_size_gb }}GiB. Increase
+      semaphore_jobs_volume_size_gb or reduce semaphore_cleanup_days to avoid disk exhaustion.
+  warn: true
+
+- name: Warn when webhook URL appears to target an internal address
+  when:
+    - semaphore_webhook_url | length > 0
+    - semaphore_webhook_url is match('^https?://(127\\.0\\.0\\.1|10\\.|192\\.168\\.|172\\.(1[6-9]|2[0-9]|3[0-1])\\.)')
+  debug:
+    msg: >-
+      The configured webhook URL ({{ semaphore_webhook_url }}) appears to reference a private
+      address. Confirm external consumers can reach this endpoint or publish a public URL.
+  warn: true
 
 - name: Warn when running behind a non-root web path
   debug:
@@ -106,3 +190,26 @@
         name: common.apply_runtime
       vars:
         runtime: "{{ runtime_item }}"
+
+- name: Verify Semaphore administrator credentials via API
+  when: semaphore_verify_admin_password | bool
+  vars:
+    semaphore_login_url: "{{ (semaphore_external_url | regex_replace('/+$', '')) }}/api/auth/login"
+  no_log: true
+  block:
+    - name: Attempt Semaphore administrator login
+      uri:
+        url: "{{ semaphore_login_url }}"
+        method: POST
+        body_format: json
+        body:
+          auth:
+            login: "{{ semaphore_admin_username }}"
+            password: "{{ semaphore_admin_password }}"
+        status_code: 200
+        validate_certs: {{ semaphore_verify_admin_password_validate_certs | bool }}
+      register: semaphore_admin_login_result
+      retries: 5
+      delay: 5
+      until: semaphore_admin_login_result.status == 200
+      failed_when: semaphore_admin_login_result.status != 200
