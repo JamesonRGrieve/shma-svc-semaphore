@@ -4,7 +4,7 @@ service_unit_name: semaphore
 service_image: docker.io/semaphoreui/semaphore:v2.16.34
 version: "2.16.34"
 needs_container_runtime: true
-service_ip: "{{ semaphore_container_ip }}"
+service_ip: "{{ semaphore_service_ip }}"
 service_ports:
   - target: 3000
     published: {{ semaphore_service_port }}
@@ -54,7 +54,8 @@ service_security:
     - ALL
   no_new_privileges: true
 requires:
-  - mariadb
+  - name: mariadb
+    version: ">=10.3"
 exports:
   env:
     - name: SEMAPHORE_URL
@@ -146,56 +147,121 @@ semaphore_config_volume_size_gb: 2
 semaphore_data_volume_size_gb: 20
 semaphore_jobs_volume: semaphore-jobs
 semaphore_jobs_volume_size_gb: 10
+semaphore_estimated_daily_artifacts_mb: 0
 semaphore_container_vmid: 230
 semaphore_container_ip: 192.168.100.14
 semaphore_container_gateway: 192.168.100.1
 semaphore_container_cidr: 24
 semaphore_container_bridge: vmbr0
 semaphore_container_interface: eth0
+semaphore_prefer_ipv6: false
+semaphore_service_ip: >-
+  {% if semaphore_prefer_ipv6 | bool
+        and ansible_default_ipv6 is defined
+        and ansible_default_ipv6.address is defined
+        and (ansible_default_ipv6.address | string | length) > 0 %}
+  {{ ansible_default_ipv6.address }}
+  {% else %}
+  {{ semaphore_container_ip }}
+  {% endif %}
+# Resource sizing guidance:
+# - For 10-50 concurrent tasks, the default reservation of 2 cores / 2048 MB is sufficient.
+# - Scale to at least 4 cores / 4096 MB when sustaining more than 100 parallel tasks.
 semaphore_container_cpu_cores: 2
 semaphore_container_memory_mb: 2048
 semaphore_container_swap_mb: 2048
 semaphore_container_storage_gb: "{{ semaphore_config_volume_size_gb + semaphore_data_volume_size_gb }}"
 semaphore_container_template: local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst
 semaphore_db_host: >-
-  {{
-    (dependency_exports.mariadb.DATABASE_HOST
-     if (dependency_exports is defined
-         and dependency_exports.mariadb is defined
-         and dependency_exports.mariadb.DATABASE_HOST is defined)
-     else lookup('env', 'SEMAPHORE_DB_HOST'))
-    | default('mariadb', true)
-  }}
+  {% if dependency_exports is defined
+        and dependency_exports.mariadb is defined
+        and dependency_exports.mariadb.DATABASE_HOST is defined
+        and dependency_exports.mariadb.DATABASE_HOST | string | length > 0 %}
+  {{ dependency_exports.mariadb.DATABASE_HOST }}
+  {% else %}
+  {% set env_host = lookup('env', 'SEMAPHORE_DB_HOST') | default('', true) %}
+  {{ env_host if env_host | length > 0 else 'mariadb' }}
+  {% endif %}
 semaphore_db_port: >-
-  {{
-    (dependency_exports.mariadb.DATABASE_PORT
-     if (dependency_exports is defined
-         and dependency_exports.mariadb is defined
-         and dependency_exports.mariadb.DATABASE_PORT is defined)
-     else lookup('env', 'SEMAPHORE_DB_PORT'))
-    | default(3306, true)
-  }}
-semaphore_db_user: "{{ lookup('env', 'SEMAPHORE_DB_USER') | default('semaphore', true) }}"
-semaphore_db_name: "{{ lookup('env', 'SEMAPHORE_DB_NAME') | default('semaphore', true) }}"
-semaphore_db_password: "{{ lookup('env', 'SEMAPHORE_DB_PASSWORD') | default(semaphore_db_password_default, true) }}"
-semaphore_db_dialect: "{{ lookup('env', 'SEMAPHORE_DB_DIALECT') | default('mysql', true) }}"
-semaphore_admin_username: "{{ lookup('env', 'SEMAPHORE_ADMIN') | default('admin', true) }}"
-semaphore_admin_name: "{{ lookup('env', 'SEMAPHORE_ADMIN_NAME') | default('Automation Admin', true) }}"
-semaphore_admin_email: "{{ lookup('env', 'SEMAPHORE_ADMIN_EMAIL') | default(semaphore_admin_email_default, true) }}"
-semaphore_admin_password: "{{ lookup('env', 'SEMAPHORE_ADMIN_PASSWORD') | default(semaphore_admin_password_default, true) }}"
-semaphore_timezone: "{{ lookup('env', 'SEMAPHORE_TZ') | default('UTC', true) }}"
-semaphore_web_root: "{{ lookup('env', 'SEMAPHORE_WEB_ROOT') | default('/', true) }}"
-semaphore_external_url: "{{ lookup('env', 'SEMAPHORE_URL') | default('http://' ~ service_ip ~ ':' ~ (semaphore_service_port | string), true) }}"
-semaphore_external_hostname: "{{ lookup('env', 'SEMAPHORE_FQDN') | default(semaphore_external_url | regex_replace('^https?://([^/:]+).*', '\\1'), true) }}"
+  {% if dependency_exports is defined
+        and dependency_exports.mariadb is defined
+        and dependency_exports.mariadb.DATABASE_PORT is defined
+        and dependency_exports.mariadb.DATABASE_PORT | string | length > 0 %}
+  {{ dependency_exports.mariadb.DATABASE_PORT | int }}
+  {% else %}
+  {% set env_port = lookup('env', 'SEMAPHORE_DB_PORT') | default('', true) %}
+  {{ env_port | int if env_port | length > 0 else 3306 }}
+  {% endif %}
+semaphore_db_host_bracketed: >-
+  {% if ':' in semaphore_db_host and '[' not in semaphore_db_host and ']' not in semaphore_db_host %}
+  [{{ semaphore_db_host }}]
+  {% else %}
+  {{ semaphore_db_host }}
+  {% endif %}
+semaphore_db_endpoint: "{{ semaphore_db_host_bracketed }}:{{ semaphore_db_port }}"
+semaphore_db_user: >-
+  {% set env_user = lookup('env', 'SEMAPHORE_DB_USER') | default('', true) %}
+  {{ env_user if env_user | length > 0 else 'semaphore' }}
+semaphore_db_name: >-
+  {% set env_name = lookup('env', 'SEMAPHORE_DB_NAME') | default('', true) %}
+  {{ env_name if env_name | length > 0 else 'semaphore' }}
+semaphore_db_password: >-
+  {% set env_password = lookup('env', 'SEMAPHORE_DB_PASSWORD') | default('', true) %}
+  {{ env_password if env_password | length > 0 else semaphore_db_password_default }}
+semaphore_db_dialect: >-
+  {% set env_dialect = lookup('env', 'SEMAPHORE_DB_DIALECT') | default('', true) %}
+  {{ env_dialect if env_dialect | length > 0 else 'mysql' }}
+semaphore_admin_username: >-
+  {% set env_admin_user = lookup('env', 'SEMAPHORE_ADMIN') | default('', true) %}
+  {{ env_admin_user if env_admin_user | length > 0 else 'admin' }}
+semaphore_admin_name: >-
+  {% set env_admin_name = lookup('env', 'SEMAPHORE_ADMIN_NAME') | default('', true) %}
+  {{ env_admin_name if env_admin_name | length > 0 else 'Automation Admin' }}
+semaphore_admin_email: >-
+  {% set env_admin_email = lookup('env', 'SEMAPHORE_ADMIN_EMAIL') | default('', true) %}
+  {{ env_admin_email if env_admin_email | length > 0 else semaphore_admin_email_default }}
+semaphore_admin_password: >-
+  {% set env_admin_password = lookup('env', 'SEMAPHORE_ADMIN_PASSWORD') | default('', true) %}
+  {{ env_admin_password if env_admin_password | length > 0 else semaphore_admin_password_default }}
+semaphore_timezone: >-
+  {% set env_timezone = lookup('env', 'SEMAPHORE_TZ') | default('', true) %}
+  {{ env_timezone if env_timezone | length > 0 else 'UTC' }}
+semaphore_web_root: >-
+  {% set env_web_root = lookup('env', 'SEMAPHORE_WEB_ROOT') | default('', true) %}
+  {{ env_web_root if env_web_root | length > 0 else '/' }}
+semaphore_external_url: >-
+  {% set env_external_url = lookup('env', 'SEMAPHORE_URL') | default('', true) %}
+  {{ env_external_url if env_external_url | length > 0 else 'http://' ~ service_ip ~ ':' ~ (semaphore_service_port | string) }}
+semaphore_external_hostname: >-
+  {% set env_external_hostname = lookup('env', 'SEMAPHORE_FQDN') | default('', true) %}
+  {{ env_external_hostname if env_external_hostname | length > 0 else semaphore_external_url | regex_replace('^https?://([^/:]+).*', '\\1') }}
 semaphore_kubernetes_namespace: automation
 semaphore_kubernetes_replicas: 1
 
 semaphore_admin_email_default: admin@example.com
 semaphore_admin_password_default: change-me-semaphore-admin
 semaphore_db_password_default: change-me-semaphore-db
+semaphore_required_mariadb_version: '10.3'
 semaphore_password_min_length: 12
-semaphore_password_complexity_regex: '^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).+$'
+semaphore_password_complexity_regex: '^.*$'
+semaphore_common_weak_passwords:
+  - password
+  - password123
+  - password123!
+  - password1!
+  - admin
+  - admin123
+  - admin2024
+  - changeme
+  - semaphore
+  - semaphore123
+  - qwerty123
+  - qwerty123!
+  - letmein123
+  - welcome123
 semaphore_db_verify_connectivity: true
+semaphore_verify_admin_password: false
+semaphore_verify_admin_password_validate_certs: false
 semaphore_db_connect_timeout: 30
 semaphore_db_tls_enabled: true
 semaphore_db_tls_skip_verify: false
@@ -206,14 +272,17 @@ semaphore_db_password_file_enabled: true
 semaphore_admin_password_file_enabled: true
 semaphore_db_password_file_path: "{{ semaphore_secret_mount_root }}/db_password"
 semaphore_admin_password_file_path: "{{ semaphore_secret_mount_root }}/admin_password"
-semaphore_secret_mount_root: /run/secrets/semaphore
+semaphore_secret_mount_prefix: /run/secrets
+semaphore_secret_mount_root: "{{ semaphore_secret_mount_prefix }}"
 semaphore_render_db_password_env: false
 semaphore_cors_allowed_origins: ""
 semaphore_session_timeout_seconds: 86400
 semaphore_max_parallel_tasks: 25
 semaphore_cleanup_days: 30
 semaphore_git_strict_host_key_checking: true
-semaphore_webhook_url: "{{ lookup('env', 'SEMAPHORE_WEBHOOK_URL') | default('', true) }}"
+semaphore_webhook_url: >-
+  {% set env_webhook_url = lookup('env', 'SEMAPHORE_WEBHOOK_URL') | default('', true) %}
+  {{ env_webhook_url if env_webhook_url | length > 0 else '' }}
 semaphore_kubernetes_resources:
   limits:
     cpu: "{{ semaphore_container_cpu_cores }}"
@@ -278,20 +347,27 @@ semaphore_secret_env_legacy_db:
   - name: SEMAPHORE_DB_PASS
     value: "{{ semaphore_db_password }}"
 
-semaphore_secret_files_db:
-  - name: semaphore-db-password
-    path: "{{ semaphore_db_password_file_path }}"
-    mode: '0400'
-    value: "{{ semaphore_db_password }}"
-
-semaphore_secret_files_admin:
-  - name: semaphore-admin-password
-    path: "{{ semaphore_admin_password_file_path }}"
-    mode: '0400'
-    value: "{{ semaphore_admin_password }}"
-
+# Base service environment values are defined before optional legacy overrides so the
+# primary contract wins when duplicate keys are introduced. A runtime assertion validates
+# that no duplicate environment variable names remain after the merge.
 semaphore_service_env: "{{ (semaphore_service_env_base + (semaphore_render_db_password_env | ternary(semaphore_service_env_legacy, []))) | to_yaml | from_yaml }}"
 
 semaphore_secret_env: "{{ ((semaphore_render_db_password_env | ternary(semaphore_secret_env_legacy_db, [])) + semaphore_secret_env_base) | to_yaml | from_yaml }}"
 
-semaphore_secret_files: "{{ ((semaphore_db_password_file_enabled | ternary(semaphore_secret_files_db, [])) + (semaphore_admin_password_file_enabled | ternary(semaphore_secret_files_admin, []))) | to_yaml | from_yaml }}"
+semaphore_secret_files_all:
+  db_password:
+    enabled: {{ semaphore_db_password_file_enabled | bool }}
+    entry:
+      name: semaphore-db-password
+      path: "{{ semaphore_db_password_file_path }}"
+      mode: '0400'
+      value: "{{ semaphore_db_password }}"
+  admin_password:
+    enabled: {{ semaphore_admin_password_file_enabled | bool }}
+    entry:
+      name: semaphore-admin-password
+      path: "{{ semaphore_admin_password_file_path }}"
+      mode: '0400'
+      value: "{{ semaphore_admin_password }}"
+
+semaphore_secret_files: "{{ semaphore_secret_files_all | dict2items | selectattr('value.enabled') | map(attribute='value.entry') | list | to_yaml | from_yaml }}"
