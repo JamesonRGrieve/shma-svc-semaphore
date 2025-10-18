@@ -81,6 +81,15 @@ exports:
     - name: SEMAPHORE_ADMIN_EMAIL
       value: "{{ semaphore_admin_email }}"
       description: Default administrator email
+    - name: APP_FQDN
+      value: "{{ semaphore_external_hostname }}"
+      description: External hostname served by the reverse proxy
+    - name: APP_PORT
+      value: "{{ semaphore_service_port | string }}"
+      description: Published TCP port for downstream consumers
+    - name: APP_BACKEND_IP
+      value: "{{ service_ip }}"
+      description: Backend service address used by edge automation
 mounts:
   persistent_volumes:
     - name: config
@@ -172,5 +181,6 @@ semaphore_admin_password: "{{ lookup('env', 'SEMAPHORE_ADMIN_PASSWORD') | defaul
 semaphore_timezone: "{{ lookup('env', 'SEMAPHORE_TZ') | default('UTC', true) }}"
 semaphore_web_root: "{{ lookup('env', 'SEMAPHORE_WEB_ROOT') | default('/', true) }}"
 semaphore_external_url: "{{ lookup('env', 'SEMAPHORE_URL') | default('http://' ~ service_ip ~ ':' ~ (semaphore_service_port | string), true) }}"
+semaphore_external_hostname: "{{ lookup('env', 'SEMAPHORE_FQDN') | default(semaphore_external_url | regex_replace('^https?://([^/:]+).*', '\\1'), true) }}"
 semaphore_kubernetes_namespace: automation
 semaphore_kubernetes_replicas: 1

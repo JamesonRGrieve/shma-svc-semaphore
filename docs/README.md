@@ -17,11 +17,32 @@ Declarative Ansible Semaphore 2.16 service definition that reuses the shared inf
 SEMAPHORE_URL={{ semaphore_external_url }}
 SEMAPHORE_PORT={{ semaphore_service_port }}
 SEMAPHORE_ADMIN_EMAIL={{ semaphore_admin_email }}
+APP_FQDN={{ semaphore_external_hostname }}
+APP_PORT={{ semaphore_service_port }}
+APP_BACKEND_IP={{ service_ip }}
 ```
+
+These are also written to `exports.env` so downstream automation and edge devices can source the values without parsing task output.
 
 ### Secrets
 - `SEMAPHORE_DB_PASS` → database password forwarded to the Semaphore container
 - `SEMAPHORE_ADMIN_PASSWORD` → bootstrap administrator password
+
+The runtime adapters call the shared `common.render_secrets` helper, so any values defined in `secrets.env` or vaulted vars are rendered into the target secret store automatically. A typical playbook maps inventory/group vars to the secret renderer like this:
+
+```yaml
+- name: Deploy Semaphore
+  hosts: automation_hosts
+  roles:
+    - role: svc-semaphore
+      vars:
+        runtime: docker
+        dependency_registry_file: dependency-registry.yml
+        semaphore_db_password: "{{ secrets.semaphore.db_password }}"
+        semaphore_admin_password: "{{ secrets.semaphore.admin_password }}"
+```
+
+Where `secrets.semaphore.*` is produced by the shared secrets renderer (for example via `common.secrets_renderer`) to keep passwords out of static vars files.
 
 ### Mounts
 - Persistent: `/etc/semaphore` (config), `/var/lib/semaphore` (data store)
@@ -55,3 +76,9 @@ SEMAPHORE_ADMIN_EMAIL={{ semaphore_admin_email }}
         semaphore_admin_password: "{{ vault_semaphore_admin_password }}"
 ```
 
+
+### Reverse Proxy and TLS
+- Set `semaphore_external_url` (or `SEMAPHORE_URL`) to the public HTTPS URL that clients will use. The role will derive `APP_FQDN` from this value for edge integrations.
+- Terminate TLS at your reverse proxy and forward traffic to `APP_BACKEND_IP:APP_PORT` (defaults `{{ service_ip }}`:`{{ semaphore_service_port }}`) with the `Host` header preserved.
+- When running behind Traefik, Caddy, or Nginx, proxy `/` to the backend and configure WebSocket upgrades since Semaphore streams job output over WebSockets.
+- Optionally publish `SEMAPHORE_WEB_ROOT` if the service will live under a sub-path; the generated runtime definitions propagate this setting across Docker, Podman, Kubernetes, Proxmox, and bare-metal systemd targets.
