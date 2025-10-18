@@ -9,27 +9,7 @@ service_ports:
   - target: 3000
     published: {{ semaphore_service_port }}
     protocol: tcp
-service_env:
-  - name: SEMAPHORE_DB_DIALECT
-    value: "{{ semaphore_db_dialect }}"
-  - name: SEMAPHORE_DB_HOST
-    value: "{{ semaphore_db_host }}"
-  - name: SEMAPHORE_DB_PORT
-    value: "{{ semaphore_db_port | string }}"
-  - name: SEMAPHORE_DB_USER
-    value: "{{ semaphore_db_user }}"
-  - name: SEMAPHORE_DB_NAME
-    value: "{{ semaphore_db_name }}"
-  - name: SEMAPHORE_ADMIN
-    value: "{{ semaphore_admin_username }}"
-  - name: SEMAPHORE_ADMIN_NAME
-    value: "{{ semaphore_admin_name }}"
-  - name: SEMAPHORE_ADMIN_EMAIL
-    value: "{{ semaphore_admin_email }}"
-  - name: SEMAPHORE_WEB_ROOT
-    value: "{{ semaphore_web_root }}"
-  - name: TZ
-    value: "{{ semaphore_timezone }}"
+service_env: "{{ semaphore_service_env | to_yaml | from_yaml }}"
 service_volumes:
   - name: config
     source: "{{ semaphore_config_volume }}"
@@ -41,6 +21,11 @@ service_volumes:
     target: /var/lib/semaphore
     driver: local
     size: "{{ semaphore_data_volume_size_gb }}Gi"
+  - name: jobs
+    source: "{{ semaphore_jobs_volume }}"
+    target: /var/lib/semaphore/jobs
+    driver: local
+    size: "{{ semaphore_jobs_volume_size_gb }}Gi"
 service_resources:
   memory_mb: "{{ semaphore_container_memory_mb }}"
   cpu_cores: "{{ semaphore_container_cpu_cores }}"
@@ -90,12 +75,17 @@ exports:
     - name: APP_BACKEND_IP
       value: "{{ service_ip }}"
       description: Backend service address used by edge automation
+    - name: SEMAPHORE_WEBHOOK_URL
+      value: "{{ semaphore_webhook_url }}"
+      description: URL endpoint for triggering Semaphore jobs via webhook
 mounts:
   persistent_volumes:
     - name: config
       path: /etc/semaphore
     - name: data
       path: /var/lib/semaphore
+    - name: jobs
+      path: /var/lib/semaphore/jobs
   ephemeral_mounts:
     - name: semaphore-run
       path: /run/semaphore
@@ -116,6 +106,19 @@ health:
   interval: 15s
   timeout: 10s
   retries: 5
+startup_probe:
+  cmd:
+    - curl
+    - -fsS
+    - "http://127.0.0.1:{{ semaphore_service_port }}/api/ping"
+  initial_delay: 60s
+  period: 20s
+readiness_probe:
+  cmd:
+    - curl
+    - -fsS
+    - "http://127.0.0.1:{{ semaphore_service_port }}/api/ping"
+  period: 20s
 storage:
   - name: config
     path: /etc/semaphore
@@ -123,6 +126,9 @@ storage:
   - name: data
     path: /var/lib/semaphore
     size: "{{ semaphore_data_volume_size_gb }}G"
+  - name: jobs
+    path: /var/lib/semaphore/jobs
+    size: "{{ semaphore_jobs_volume_size_gb }}G"
 runtime_templates:
   proxmox: proxmox.yml.j2
   docker: docker.yml.j2
@@ -130,17 +136,16 @@ runtime_templates:
   kubernetes: kubernetes.yml.j2
   baremetal: baremetal.yml.j2
 secrets:
-  env:
-    - name: SEMAPHORE_DB_PASS
-      value: "{{ semaphore_db_password }}"
-    - name: SEMAPHORE_ADMIN_PASSWORD
-      value: "{{ semaphore_admin_password }}"
+  env: "{{ semaphore_secret_env | to_yaml | from_yaml }}"
+  files: "{{ semaphore_secret_files | to_yaml | from_yaml }}"
 
 semaphore_service_port: 3000
 semaphore_config_volume: semaphore-config
 semaphore_data_volume: semaphore-data
 semaphore_config_volume_size_gb: 2
 semaphore_data_volume_size_gb: 20
+semaphore_jobs_volume: semaphore-jobs
+semaphore_jobs_volume_size_gb: 10
 semaphore_container_vmid: 230
 semaphore_container_ip: 192.168.100.14
 semaphore_container_gateway: 192.168.100.1
@@ -172,15 +177,121 @@ semaphore_db_port: >-
   }}
 semaphore_db_user: "{{ lookup('env', 'SEMAPHORE_DB_USER') | default('semaphore', true) }}"
 semaphore_db_name: "{{ lookup('env', 'SEMAPHORE_DB_NAME') | default('semaphore', true) }}"
-semaphore_db_password: "{{ lookup('env', 'SEMAPHORE_DB_PASSWORD') | default('change-me-semaphore-db', true) }}"
+semaphore_db_password: "{{ lookup('env', 'SEMAPHORE_DB_PASSWORD') | default(semaphore_db_password_default, true) }}"
 semaphore_db_dialect: "{{ lookup('env', 'SEMAPHORE_DB_DIALECT') | default('mysql', true) }}"
 semaphore_admin_username: "{{ lookup('env', 'SEMAPHORE_ADMIN') | default('admin', true) }}"
 semaphore_admin_name: "{{ lookup('env', 'SEMAPHORE_ADMIN_NAME') | default('Automation Admin', true) }}"
-semaphore_admin_email: "{{ lookup('env', 'SEMAPHORE_ADMIN_EMAIL') | default('admin@example.com', true) }}"
-semaphore_admin_password: "{{ lookup('env', 'SEMAPHORE_ADMIN_PASSWORD') | default('change-me-semaphore-admin', true) }}"
+semaphore_admin_email: "{{ lookup('env', 'SEMAPHORE_ADMIN_EMAIL') | default(semaphore_admin_email_default, true) }}"
+semaphore_admin_password: "{{ lookup('env', 'SEMAPHORE_ADMIN_PASSWORD') | default(semaphore_admin_password_default, true) }}"
 semaphore_timezone: "{{ lookup('env', 'SEMAPHORE_TZ') | default('UTC', true) }}"
 semaphore_web_root: "{{ lookup('env', 'SEMAPHORE_WEB_ROOT') | default('/', true) }}"
 semaphore_external_url: "{{ lookup('env', 'SEMAPHORE_URL') | default('http://' ~ service_ip ~ ':' ~ (semaphore_service_port | string), true) }}"
 semaphore_external_hostname: "{{ lookup('env', 'SEMAPHORE_FQDN') | default(semaphore_external_url | regex_replace('^https?://([^/:]+).*', '\\1'), true) }}"
 semaphore_kubernetes_namespace: automation
 semaphore_kubernetes_replicas: 1
+
+semaphore_admin_email_default: admin@example.com
+semaphore_admin_password_default: change-me-semaphore-admin
+semaphore_db_password_default: change-me-semaphore-db
+semaphore_password_min_length: 12
+semaphore_password_complexity_regex: '^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).+$'
+semaphore_db_verify_connectivity: true
+semaphore_db_connect_timeout: 30
+semaphore_db_tls_enabled: true
+semaphore_db_tls_skip_verify: false
+semaphore_db_options: "tls={{ 'true' if semaphore_db_tls_enabled else 'false' }}&tls-skip-verify={{ 'true' if semaphore_db_tls_skip_verify else 'false' }}"
+semaphore_db_max_open_conns: 50
+semaphore_db_max_idle_conns: 10
+semaphore_db_password_file_enabled: true
+semaphore_admin_password_file_enabled: true
+semaphore_db_password_file_path: "{{ semaphore_secret_mount_root }}/db_password"
+semaphore_admin_password_file_path: "{{ semaphore_secret_mount_root }}/admin_password"
+semaphore_secret_mount_root: /run/secrets/semaphore
+semaphore_render_db_password_env: false
+semaphore_cors_allowed_origins: ""
+semaphore_session_timeout_seconds: 86400
+semaphore_max_parallel_tasks: 25
+semaphore_cleanup_days: 30
+semaphore_git_strict_host_key_checking: true
+semaphore_webhook_url: "{{ lookup('env', 'SEMAPHORE_WEBHOOK_URL') | default('', true) }}"
+semaphore_kubernetes_resources:
+  limits:
+    cpu: "{{ semaphore_container_cpu_cores }}"
+    memory: "{{ semaphore_container_memory_mb }}Mi"
+  requests:
+    cpu: "{{ semaphore_container_cpu_cores }}"
+    memory: "{{ semaphore_container_memory_mb }}Mi"
+
+semaphore_service_env_base:
+  - name: SEMAPHORE_DB_DIALECT
+    value: "{{ semaphore_db_dialect }}"
+  - name: SEMAPHORE_DB_HOST
+    value: "{{ semaphore_db_host }}"
+  - name: SEMAPHORE_DB_PORT
+    value: "{{ semaphore_db_port | string }}"
+  - name: SEMAPHORE_DB_USER
+    value: "{{ semaphore_db_user }}"
+  - name: SEMAPHORE_DB_NAME
+    value: "{{ semaphore_db_name }}"
+  - name: SEMAPHORE_DB_OPTIONS
+    value: "{{ semaphore_db_options }}"
+  - name: SEMAPHORE_DB_MAX_OPEN_CONNS
+    value: "{{ semaphore_db_max_open_conns | string }}"
+  - name: SEMAPHORE_DB_MAX_IDLE_CONNS
+    value: "{{ semaphore_db_max_idle_conns | string }}"
+  - name: SEMAPHORE_DB_PASSWORD_FILE
+    value: "{{ semaphore_db_password_file_path if semaphore_db_password_file_enabled else '' }}"
+  - name: SEMAPHORE_ADMIN
+    value: "{{ semaphore_admin_username }}"
+  - name: SEMAPHORE_ADMIN_NAME
+    value: "{{ semaphore_admin_name }}"
+  - name: SEMAPHORE_ADMIN_EMAIL
+    value: "{{ semaphore_admin_email }}"
+  - name: SEMAPHORE_ADMIN_PASSWORD_FILE
+    value: "{{ semaphore_admin_password_file_path if semaphore_admin_password_file_enabled else '' }}"
+  - name: SEMAPHORE_WEB_ROOT
+    value: "{{ semaphore_web_root }}"
+  - name: SEMAPHORE_CORS_ALLOWED_ORIGINS
+    value: "{{ semaphore_cors_allowed_origins }}"
+  - name: SEMAPHORE_SESSION_TIMEOUT
+    value: "{{ semaphore_session_timeout_seconds | string }}"
+  - name: SEMAPHORE_MAX_PARALLEL_TASKS
+    value: "{{ semaphore_max_parallel_tasks | string }}"
+  - name: SEMAPHORE_CLEANUP_DAYS
+    value: "{{ semaphore_cleanup_days | string }}"
+  - name: SEMAPHORE_GIT_STRICT_HOST_KEY_CHECKING
+    value: "{{ 'true' if semaphore_git_strict_host_key_checking else 'false' }}"
+  - name: SEMAPHORE_WEBHOOK_URL
+    value: "{{ semaphore_webhook_url }}"
+  - name: TZ
+    value: "{{ semaphore_timezone }}"
+
+semaphore_service_env_legacy:
+  - name: SEMAPHORE_DB_PASS
+    value: "{{ semaphore_db_password }}"
+
+semaphore_secret_env_base:
+  - name: SEMAPHORE_ADMIN_PASSWORD
+    value: "{{ semaphore_admin_password }}"
+
+semaphore_secret_env_legacy_db:
+  - name: SEMAPHORE_DB_PASS
+    value: "{{ semaphore_db_password }}"
+
+semaphore_secret_files_db:
+  - name: semaphore-db-password
+    path: "{{ semaphore_db_password_file_path }}"
+    mode: '0400'
+    value: "{{ semaphore_db_password }}"
+
+semaphore_secret_files_admin:
+  - name: semaphore-admin-password
+    path: "{{ semaphore_admin_password_file_path }}"
+    mode: '0400'
+    value: "{{ semaphore_admin_password }}"
+
+semaphore_service_env: "{{ (semaphore_service_env_base + (semaphore_render_db_password_env | ternary(semaphore_service_env_legacy, []))) | to_yaml | from_yaml }}"
+
+semaphore_secret_env: "{{ ((semaphore_render_db_password_env | ternary(semaphore_secret_env_legacy_db, [])) + semaphore_secret_env_base) | to_yaml | from_yaml }}"
+
+semaphore_secret_files: "{{ ((semaphore_db_password_file_enabled | ternary(semaphore_secret_files_db, [])) + (semaphore_admin_password_file_enabled | ternary(semaphore_secret_files_admin, []))) | to_yaml | from_yaml }}"
