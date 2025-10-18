@@ -20,6 +20,65 @@
   loop_control:
     label: "{{ item.key }}"
 
+- name: Perform dependency pre-flight checks
+  run_once: true
+  block:
+    - name: Wait for MariaDB dependency to accept connections
+      when: semaphore_db_verify_connectivity | bool
+      wait_for:
+        host: "{{ semaphore_db_host }}"
+        port: "{{ semaphore_db_port | int }}"
+        timeout: "{{ semaphore_db_connect_timeout }}"
+        msg: >-
+          Timed out waiting for MariaDB at {{ semaphore_db_host }}:{{ semaphore_db_port }}.
+          Ensure the database dependency is reachable before deploying Semaphore.
+
+    - name: Validate administrator and database secrets
+      no_log: true
+      block:
+        - name: Ensure administrator email is not the default placeholder
+          assert:
+            that:
+              - semaphore_admin_email | lower != semaphore_admin_email_default | lower
+            fail_msg: >-
+              The configured Semaphore administrator email must be changed from the default
+              placeholder ({{ semaphore_admin_email_default }}).
+
+        - name: Ensure administrator password meets complexity requirements
+          vars:
+            password: "{{ semaphore_admin_password }}"
+          assert:
+            that:
+              - password | length >= semaphore_password_min_length
+              - password is match(semaphore_password_complexity_regex)
+              - password | lower != semaphore_admin_password_default | lower
+            fail_msg: >-
+              The Semaphore administrator password must be rotated from the default and meet
+              the configured complexity policy (minimum length {{ semaphore_password_min_length }}
+              with upper, lower, number, and symbol characters).
+
+        - name: Ensure database password meets complexity requirements
+          vars:
+            password: "{{ semaphore_db_password }}"
+          assert:
+            that:
+              - password | length >= semaphore_password_min_length
+              - password is match(semaphore_password_complexity_regex)
+              - password | lower != semaphore_db_password_default | lower
+            fail_msg: >-
+              The Semaphore database password must be rotated from the default and meet the
+              configured complexity policy (minimum length {{ semaphore_password_min_length }}
+              with upper, lower, number, and symbol characters).
+
+- name: Warn when running behind a non-root web path
+  debug:
+    msg: >-
+      semaphore_web_root is set to {{ semaphore_web_root }}. Validate frontend asset delivery
+      and reverse proxy rewrites because sub-path hosting is not officially supported by
+      Semaphore.
+  when: semaphore_web_root != '/'
+  run_once: true
+
 - name: Ensure requested runtimes are supported
   assert:
     that:
