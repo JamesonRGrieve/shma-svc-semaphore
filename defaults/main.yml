@@ -1,0 +1,176 @@
+service_id: semaphore
+service_name: semaphore
+service_unit_name: semaphore
+service_image: docker.io/semaphoreui/semaphore:v2.16.34
+version: "2.16.34"
+needs_container_runtime: true
+service_ip: "{{ semaphore_container_ip }}"
+service_ports:
+  - target: 3000
+    published: {{ semaphore_service_port }}
+    protocol: tcp
+service_env:
+  - name: SEMAPHORE_DB_DIALECT
+    value: "{{ semaphore_db_dialect }}"
+  - name: SEMAPHORE_DB_HOST
+    value: "{{ semaphore_db_host }}"
+  - name: SEMAPHORE_DB_PORT
+    value: "{{ semaphore_db_port | string }}"
+  - name: SEMAPHORE_DB_USER
+    value: "{{ semaphore_db_user }}"
+  - name: SEMAPHORE_DB_NAME
+    value: "{{ semaphore_db_name }}"
+  - name: SEMAPHORE_ADMIN
+    value: "{{ semaphore_admin_username }}"
+  - name: SEMAPHORE_ADMIN_NAME
+    value: "{{ semaphore_admin_name }}"
+  - name: SEMAPHORE_ADMIN_EMAIL
+    value: "{{ semaphore_admin_email }}"
+  - name: SEMAPHORE_WEB_ROOT
+    value: "{{ semaphore_web_root }}"
+  - name: TZ
+    value: "{{ semaphore_timezone }}"
+service_volumes:
+  - name: config
+    source: "{{ semaphore_config_volume }}"
+    target: /etc/semaphore
+    driver: local
+    size: "{{ semaphore_config_volume_size_gb }}Gi"
+  - name: data
+    source: "{{ semaphore_data_volume }}"
+    target: /var/lib/semaphore
+    driver: local
+    size: "{{ semaphore_data_volume_size_gb }}Gi"
+service_resources:
+  memory_mb: "{{ semaphore_container_memory_mb }}"
+  cpu_cores: "{{ semaphore_container_cpu_cores }}"
+service_namespace: "{{ semaphore_kubernetes_namespace }}"
+service_replicas: "{{ semaphore_kubernetes_replicas }}"
+service_container:
+  vmid: "{{ semaphore_container_vmid }}"
+  hostname: "{{ service_name }}"
+  ostemplate: "{{ semaphore_container_template }}"
+  disk: "{{ semaphore_container_storage_gb }}"
+  cores: "{{ semaphore_container_cpu_cores }}"
+  memory: "{{ semaphore_container_memory_mb }}"
+  swap: "{{ semaphore_container_swap_mb }}"
+  bridge: "{{ semaphore_container_bridge }}"
+  cidr: "{{ semaphore_container_cidr }}"
+  gateway: "{{ semaphore_container_gateway }}"
+  interface: "{{ semaphore_container_interface }}"
+  onboot: yes
+  unprivileged: yes
+  features: nesting=1,keyctl=1
+service_security:
+  run_as_user: 1001
+  run_as_group: 1001
+  read_only_root_filesystem: true
+  capabilities_drop:
+    - ALL
+  no_new_privileges: true
+requires:
+  - mariadb
+exports:
+  env:
+    - name: SEMAPHORE_URL
+      value: "{{ semaphore_external_url }}"
+      description: Base URL for Semaphore automation UI
+    - name: SEMAPHORE_PORT
+      value: "{{ semaphore_service_port | string }}"
+      description: Published HTTP port
+    - name: SEMAPHORE_ADMIN_EMAIL
+      value: "{{ semaphore_admin_email }}"
+      description: Default administrator email
+mounts:
+  persistent_volumes:
+    - name: config
+      path: /etc/semaphore
+    - name: data
+      path: /var/lib/semaphore
+  ephemeral_mounts:
+    - name: semaphore-run
+      path: /run/semaphore
+      apply_to: [docker, podman, proxmox, baremetal]
+      medium: Memory
+      size: 32Mi
+      mode: '0755'
+    - name: semaphore-tmp
+      path: /tmp/semaphore
+      apply_to: [docker, podman, kubernetes, proxmox, baremetal]
+      medium: Memory
+      size: 64Mi
+health:
+  cmd:
+    - curl
+    - -fsS
+    - "http://127.0.0.1:{{ semaphore_service_port }}/"
+  interval: 15s
+  timeout: 10s
+  retries: 5
+storage:
+  - name: config
+    path: /etc/semaphore
+    size: "{{ semaphore_config_volume_size_gb }}G"
+  - name: data
+    path: /var/lib/semaphore
+    size: "{{ semaphore_data_volume_size_gb }}G"
+runtime_templates:
+  proxmox: proxmox.yml.j2
+  docker: docker.yml.j2
+  podman: podman.yml.j2
+  kubernetes: kubernetes.yml.j2
+  baremetal: baremetal.yml.j2
+secrets:
+  env:
+    - name: SEMAPHORE_DB_PASS
+      value: "{{ semaphore_db_password }}"
+    - name: SEMAPHORE_ADMIN_PASSWORD
+      value: "{{ semaphore_admin_password }}"
+
+semaphore_service_port: 3000
+semaphore_config_volume: semaphore-config
+semaphore_data_volume: semaphore-data
+semaphore_config_volume_size_gb: 2
+semaphore_data_volume_size_gb: 20
+semaphore_container_vmid: 230
+semaphore_container_ip: 192.168.100.14
+semaphore_container_gateway: 192.168.100.1
+semaphore_container_cidr: 24
+semaphore_container_bridge: vmbr0
+semaphore_container_interface: eth0
+semaphore_container_cpu_cores: 2
+semaphore_container_memory_mb: 2048
+semaphore_container_swap_mb: 2048
+semaphore_container_storage_gb: "{{ semaphore_config_volume_size_gb + semaphore_data_volume_size_gb }}"
+semaphore_container_template: local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst
+semaphore_db_host: >-
+  {{
+    (dependency_exports.mariadb.DATABASE_HOST
+     if (dependency_exports is defined
+         and dependency_exports.mariadb is defined
+         and dependency_exports.mariadb.DATABASE_HOST is defined)
+     else lookup('env', 'SEMAPHORE_DB_HOST'))
+    | default('mariadb', true)
+  }}
+semaphore_db_port: >-
+  {{
+    (dependency_exports.mariadb.DATABASE_PORT
+     if (dependency_exports is defined
+         and dependency_exports.mariadb is defined
+         and dependency_exports.mariadb.DATABASE_PORT is defined)
+     else lookup('env', 'SEMAPHORE_DB_PORT'))
+    | default(3306, true)
+  }}
+semaphore_db_user: "{{ lookup('env', 'SEMAPHORE_DB_USER') | default('semaphore', true) }}"
+semaphore_db_name: "{{ lookup('env', 'SEMAPHORE_DB_NAME') | default('semaphore', true) }}"
+semaphore_db_password: "{{ lookup('env', 'SEMAPHORE_DB_PASSWORD') | default('change-me-semaphore-db', true) }}"
+semaphore_db_dialect: "{{ lookup('env', 'SEMAPHORE_DB_DIALECT') | default('mysql', true) }}"
+semaphore_admin_username: "{{ lookup('env', 'SEMAPHORE_ADMIN') | default('admin', true) }}"
+semaphore_admin_name: "{{ lookup('env', 'SEMAPHORE_ADMIN_NAME') | default('Automation Admin', true) }}"
+semaphore_admin_email: "{{ lookup('env', 'SEMAPHORE_ADMIN_EMAIL') | default('admin@example.com', true) }}"
+semaphore_admin_password: "{{ lookup('env', 'SEMAPHORE_ADMIN_PASSWORD') | default('change-me-semaphore-admin', true) }}"
+semaphore_timezone: "{{ lookup('env', 'SEMAPHORE_TZ') | default('UTC', true) }}"
+semaphore_web_root: "{{ lookup('env', 'SEMAPHORE_WEB_ROOT') | default('/', true) }}"
+semaphore_external_url: "{{ lookup('env', 'SEMAPHORE_URL') | default('http://' ~ service_ip ~ ':' ~ (semaphore_service_port | string), true) }}"
+semaphore_kubernetes_namespace: automation
+semaphore_kubernetes_replicas: 1
